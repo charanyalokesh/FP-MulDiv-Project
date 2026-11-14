@@ -11,6 +11,8 @@ module tb_fp_muldiv;
     logic out_valid;
     logic [31:0] result;
 
+    integer failed_tests = 0;
+
     fp_muldiv dut (
         .clk(clk),
         .reset(reset),
@@ -34,14 +36,15 @@ module tb_fp_muldiv;
         integer cycles;
         begin
             @(negedge clk);
+
             div = operation;
             a = operand_a;
             b = operand_b;
-            in_valid = 1;
+            in_valid = 1'b1;
 
             @(posedge clk);
             #1;
-            in_valid = 0;
+            in_valid = 1'b0;
 
             cycles = 0;
 
@@ -52,14 +55,21 @@ module tb_fp_muldiv;
             end
 
             if (!out_valid) begin
+                failed_tests = failed_tests + 1;
                 $display("TEST %0d FAILED: Timeout", test_number);
             end
             else if (result === expected) begin
-                $display("TEST %0d PASSED: Result = %h", test_number, result);
+                $display(
+                    "TEST %0d PASSED: Result = %h",
+                    test_number, result
+                );
             end
             else begin
-                $display("TEST %0d FAILED: Expected = %h, Got = %h",
-                         test_number, expected, result);
+                failed_tests = failed_tests + 1;
+                $display(
+                    "TEST %0d FAILED: Expected = %h, Got = %h",
+                    test_number, expected, result
+                );
             end
 
             @(negedge clk);
@@ -84,7 +94,7 @@ module tb_fp_muldiv;
         // Division tests
         run_test(1, 32'h40C00000, 32'h40000000, 32'h40400000, 3);
         run_test(1, 32'h40800000, 32'h40000000, 32'h40000000, 4);
-        
+
         // Special-case multiplication tests
         run_test(0, 32'h00000000, 32'h3F800000, 32'h00000000, 5);
         run_test(0, 32'h80000000, 32'h40000000, 32'h80000000, 6);
@@ -96,7 +106,7 @@ module tb_fp_muldiv;
         run_test(1, 32'h00000000, 32'h00000000, 32'h7FC00000, 10);
         run_test(1, 32'h7F800000, 32'h7F800000, 32'h7FC00000, 11);
         run_test(1, 32'h3F800000, 32'h7F800000, 32'h00000000, 12);
-        
+
         // Subnormal and rounding tests
         run_test(0, 32'h00000001, 32'h3F800000, 32'h00000001, 13);
         run_test(0, 32'h00800000, 32'h3F000000, 32'h00400000, 14);
@@ -112,7 +122,14 @@ module tb_fp_muldiv;
         run_test(0, 32'h00000001, 32'h3F000000, 32'h00000000, 18);
 
         $display("--------------------------------");
-        $display("Basic testing completed.");
+        $display("Total tests: 18");
+        $display("Failed tests: %0d", failed_tests);
+
+        if (failed_tests != 0)
+            $fatal(1, "%0d tests failed", failed_tests);
+        else
+            $display("ALL TESTS PASSED");
+
         $finish;
     end
 
