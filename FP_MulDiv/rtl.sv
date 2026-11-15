@@ -12,6 +12,10 @@ module fp_muldiv (
 
     localparam logic [31:0] CANONICAL_NAN = 32'h7FC00000;
 
+    // -------------------------------------------------
+    // ROUND TO NEAREST, TIES TO EVEN
+    // -------------------------------------------------
+
     function automatic logic [63:0] round_rne(
         input logic [63:0] value,
         input integer shift,
@@ -46,6 +50,10 @@ module fp_muldiv (
             round_rne = q;
         end
     endfunction
+
+    // -------------------------------------------------
+    // IEEE-754 RESULT PACKING
+    // -------------------------------------------------
 
     function automatic logic [31:0] pack_float(
         input logic sign_bit,
@@ -119,6 +127,10 @@ module fp_muldiv (
         end
     endfunction
 
+    // -------------------------------------------------
+    // FLOATING-POINT MULTIPLICATION
+    // -------------------------------------------------
+
     function automatic logic [31:0] fp_multiply(
         input logic [31:0] x,
         input logic [31:0] y
@@ -175,22 +187,17 @@ module fp_muldiv (
         end
     endfunction
 
-    function automatic logic [31:0] fp_divide(
+    // -------------------------------------------------
+    // DIVISION SPECIAL CASES
+    // -------------------------------------------------
+
+    function automatic logic [31:0] fp_divide_special(
         input logic [31:0] x,
         input logic [31:0] y
     );
         logic sx, sy;
         logic [7:0] ex, ey;
         logic [22:0] fx, fy;
-
-        logic [23:0] mx, my;
-        logic [63:0] numerator;
-        logic [63:0] quotient;
-        logic [63:0] remainder_value;
-
-        integer ax, ay;
-        integer scale;
-        integer i;
 
         begin
             sx = x[31];
@@ -202,84 +209,189 @@ module fp_muldiv (
 
             if ((ex == 255 && fx != 0) ||
                 (ey == 255 && fy != 0))
-                fp_divide = CANONICAL_NAN;
+                fp_divide_special = CANONICAL_NAN;
 
             else if ((ex == 255 && ey == 255) ||
                      ((ex == 0 && fx == 0) &&
                       (ey == 0 && fy == 0)))
-                fp_divide = CANONICAL_NAN;
+                fp_divide_special = CANONICAL_NAN;
 
             else if (ey == 0 && fy == 0)
-                fp_divide = {sx ^ sy, 8'hFF, 23'b0};
+                fp_divide_special = {sx ^ sy, 8'hFF, 23'b0};
 
             else if (ex == 255)
-                fp_divide = {sx ^ sy, 8'hFF, 23'b0};
+                fp_divide_special = {sx ^ sy, 8'hFF, 23'b0};
 
             else if (ey == 255)
-                fp_divide = {sx ^ sy, 31'b0};
+                fp_divide_special = {sx ^ sy, 31'b0};
 
-            else if (ex == 0 && fx == 0)
-                fp_divide = {sx ^ sy, 31'b0};
-
-            else begin
-                mx = (ex == 0) ? {1'b0, fx} : {1'b1, fx};
-                my = (ey == 0) ? {1'b0, fy} : {1'b1, fy};
-
-                ax = (ex == 0) ? -126 : ex - 127;
-                ay = (ey == 0) ? -126 : ey - 127;
-
-                for (i = 0; i < 24; i = i + 1) begin
-                    if (!mx[23]) begin
-                        mx = mx << 1;
-                        ax = ax - 1;
-                    end
-
-                    if (!my[23]) begin
-                        my = my << 1;
-                        ay = ay - 1;
-                    end
-                end
-
-                numerator = {mx, 40'b0};
-
-                quotient = numerator / my;
-                remainder_value = numerator % my;
-
-                scale = ax - ay - 40;
-
-                fp_divide = pack_float(
-                    sx ^ sy,
-                    quotient,
-                    scale,
-                    (remainder_value != 0)
-                );
-            end
+            else
+                fp_divide_special = {sx ^ sy, 31'b0};
         end
     endfunction
 
-    logic [31:0] mul_result;
-    logic [31:0] div_result;
+    // -------------------------------------------------
+    // DIVIDER SETUP
+    // -------------------------------------------------
+
+    logic [23:0] setup_mx, setup_my;
+    logic [63:0] setup_dividend;
+    logic [23:0] setup_divisor;
+    logic [31:0] setup_special_result;
+
+    logic setup_special;
+    logic setup_sign;
+    integer setup_ax, setup_ay;
+    integer setup_scale;
+    integer setup_i;
 
     always_comb begin
-        mul_result = fp_multiply(a, b);
-        div_result = fp_divide(a, b);
+        setup_mx = (a[30:23] == 0)
+                   ? {1'b0, a[22:0]}
+                   : {1'b1, a[22:0]};
+
+        setup_my = (b[30:23] == 0)
+                   ? {1'b0, b[22:0]}
+                   : {1'b1, b[22:0]};
+
+        setup_ax = (a[30:23] == 0)
+                   ? -126 : a[30:23] - 127;
+
+        setup_ay = (b[30:23] == 0)
+                   ? -126 : b[30:23] - 127;
+
+        for (setup_i = 0; setup_i < 24; setup_i = setup_i + 1) begin
+            if (!setup_mx[23]) begin
+                setup_mx = setup_mx << 1;
+                setup_ax = setup_ax - 1;
+            end
+
+            if (!setup_my[23]) begin
+                setup_my = setup_my << 1;
+                setup_ay = setup_ay - 1;
+            end
+        end
+
+        setup_dividend = {setup_mx, 40'b0};
+        setup_divisor = setup_my;
+        setup_scale = setup_ax - setup_ay - 40;
+        setup_sign = a[31] ^ b[31];
+
+        setup_special =
+            ((a[30:23] == 255) && (a[22:0] != 0)) ||
+            ((b[30:23] == 255) && (b[22:0] != 0)) ||
+            ((a[30:23] == 255) && (b[30:23] == 255)) ||
+            ((a[30:23] == 0) && (a[22:0] == 0) &&
+             (b[30:23] == 0) && (b[22:0] == 0)) ||
+            ((b[30:23] == 0) && (b[22:0] == 0)) ||
+            (a[30:23] == 255) ||
+            (b[30:23] == 255) ||
+            ((a[30:23] == 0) && (a[22:0] == 0));
+
+        setup_special_result = fp_divide_special(a, b);
     end
+
+    // -------------------------------------------------
+    // ITERATIVE RESTORING DIVIDER
+    // -------------------------------------------------
+
+    logic divider_busy;
+
+    logic [63:0] dividend_reg;
+    logic [63:0] quotient_reg;
+    logic [23:0] divisor_reg;
+    logic [24:0] remainder_reg;
+
+    logic [5:0] bit_count;
+    logic [31:0] divider_sign;
+    integer divider_scale;
+
+    logic [24:0] remainder_shifted;
+    logic [24:0] remainder_next;
+    logic [63:0] quotient_next;
+
+    always_comb begin
+        remainder_shifted = {
+            remainder_reg[23:0],
+            dividend_reg[bit_count]
+        };
+
+        remainder_next = remainder_shifted;
+        quotient_next = quotient_reg;
+
+        if (remainder_shifted >= {1'b0, divisor_reg}) begin
+            remainder_next =
+                remainder_shifted - {1'b0, divisor_reg};
+
+            quotient_next =
+                quotient_reg | (64'h1 << bit_count);
+        end
+    end
+
+    // -------------------------------------------------
+    // MAIN SEQUENTIAL CONTROL
+    // -------------------------------------------------
 
     always_ff @(posedge clk) begin
         if (reset) begin
             result <= 32'b0;
             out_valid <= 1'b0;
+
+            divider_busy <= 1'b0;
+            dividend_reg <= 64'b0;
+            quotient_reg <= 64'b0;
+            divisor_reg <= 24'b0;
+            remainder_reg <= 25'b0;
+            bit_count <= 6'b0;
+            divider_sign <= 32'b0;
+            divider_scale <= 0;
         end
         else begin
             out_valid <= 1'b0;
 
-            if (in_valid) begin
-                if (div)
-                    result <= div_result;
-                else
-                    result <= mul_result;
+            if (divider_busy) begin
+                dividend_reg <= dividend_reg;
+                quotient_reg <= quotient_next;
+                remainder_reg <= remainder_next;
 
-                out_valid <= 1'b1;
+                if (bit_count == 0) begin
+                    result <= pack_float(
+                        divider_sign[0],
+                        quotient_next,
+                        divider_scale,
+                        (remainder_next != 0)
+                    );
+
+                    out_valid <= 1'b1;
+                    divider_busy <= 1'b0;
+                end
+                else begin
+                    bit_count <= bit_count - 1'b1;
+                end
+            end
+            else if (in_valid) begin
+                if (!div) begin
+                    result <= fp_multiply(a, b);
+                    out_valid <= 1'b1;
+                end
+                else if (setup_special) begin
+                    result <= setup_special_result;
+                    out_valid <= 1'b1;
+                end
+                else begin
+                    dividend_reg <= setup_dividend;
+                    divisor_reg <= setup_divisor;
+
+                    quotient_reg <= 64'b0;
+                    remainder_reg <= 25'b0;
+
+                    bit_count <= 6'd63;
+
+                    divider_sign <= {31'b0, setup_sign};
+                    divider_scale <= setup_scale;
+
+                    divider_busy <= 1'b1;
+                end
             end
         end
     end
